@@ -1,0 +1,22 @@
+[project]
+name = "ai-coding-mentor"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.136.1",
+    "langchain-openai>=1.2.1",
+    "langgraph>=1.2.0",
+    "langgraph-checkpoint-postgres>=3.1.0",
+    "langgraph-cli[inmem]>=0.4.26",
+    "psycopg[binary,pool]>=3.3.4",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.1",
+    "python-dotenv>=1.2.2",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
+]

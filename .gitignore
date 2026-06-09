@@ -1,0 +1,46 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Common virtualenv names
+env/
+venv/
+
+# environment variables
+.env
+
+# IDEs and editors
+.vscode/
+.idea/
+
+# Testing, caches, and coverage
+.pytest_cache/
+.mypy_cache/
+.cache/
+.tox/
+.coverage
+coverage.xml
+htmlcov/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Packaging/build artifacts
+pip-wheel-metadata/
+.eggs/
+*.egg
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# langgrapg files
+*.langgraph
+.langgraph_api
