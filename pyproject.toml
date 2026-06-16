@@ -1,11 +1,10 @@
 [project]
 name = "ai-coding-mentor"
 version = "0.1.0"
-description = "Add your description here"
+description = "LangGraph agent service for the AI Coding Mentor"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi[standard]>=0.136.1",
     "langchain-openai>=1.2.1",
     "langgraph>=1.2.0",
     "langgraph-checkpoint-postgres>=3.1.0",

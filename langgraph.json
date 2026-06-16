@@ -1,5 +1,5 @@
 {
-  "dependencies": ["."],
+  "dependencies": ["agents", "core", "api", "schemas"],
   "graphs": {
     "agent": "./agents/mentor.py:mentor_graph"
   },
