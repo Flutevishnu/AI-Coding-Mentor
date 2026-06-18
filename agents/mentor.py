@@ -1,18 +1,22 @@
 from typing import Annotated, Literal, Optional, TypedDict
 
 from langchain_core.messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
 from core.config import settings
+from typing import Annotated, Literal, Optional, TypedDict, Any
+from langsmith import Client
 
+client = Client()
 
 class MentorState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     problem_description: str
     current_phase: Literal["IDEATION", "CODING"]
+    agreed_plan: Optional[str]
     code_submission: Optional[str]
     past_related_problems: Optional[list[str]]
     technical_blindspots: Optional[list[str]]
@@ -21,6 +25,12 @@ class MentorState(TypedDict):
     session_summary: Optional[dict]
 
 
+class CodeReview(BaseModel):
+    correctness: str = Field(description="Does it solve the problem? Any bugs or missed edge cases?")
+    complexity: str = Field(description="Actual time and space complexity with reasoning.")
+    style: str = Field(description="Readability, naming, structure.")
+    improvement: str = Field(description="The single highest-priority change.")
+
 class ConceptMastery(BaseModel):
     concept: str = Field(description="E.g., 'Two-pointer technique', 'Space complexity analysis'")
     status: Literal["mastered", "struggling", "needs_review"]
@@ -28,8 +38,6 @@ class ConceptMastery(BaseModel):
 
 
 class SessionSummary(BaseModel):
-    """Structured payload for the gateway to forward to the Node.js backend."""
-
     problem_name: str = Field(description="The formal name of the problem solved in this session.")
     core_pattern_used: str = Field(
         description="The primary algorithmic pattern (e.g., 'Two Pointers', 'Sliding Window', 'DFS')."
@@ -45,57 +53,58 @@ class SessionSummary(BaseModel):
     )
 
 
-class IntentClassification(BaseModel):
-    intent: Literal["chat", "stuck", "submit"]
+
+class VisualizationStep(BaseModel):
+    description: str = Field(description="What's happening in this step. Keep it conversational and Socratic.")
+    highlights: dict[str, Any] = Field(default_factory=dict, description="Which indices/nodes to highlight. E.g., {'i': 0, 'j': 3}. CRITICAL: MUST be a valid JSON object, NEVER a string.")
+    variables: dict[str, Any] = Field(default_factory=dict, description="Current variable values. E.g., {'sum': 8}. CRITICAL: MUST be a nested JSON object. If the underlying array/matrix/linked_list mutates in this step (e.g. marking an island as '#'), you MUST include the entire updated state here! E.g. {'grid': [['#','1','0']...], 'count': 1}")
+    found: bool = Field(default=False, description="CRITICAL: MUST be a valid boolean (true or false). True if this step is the 'eureka' moment")
+
+
+class GenerateVisualization(BaseModel):
+    viz_type: Literal["array", "linked_list", "binary_tree", "hashmap", "matrix"] = Field(
+        ...,
+        description="CRITICAL: You MUST provide this field. Choose the visualization type."
+    )
+    title: str = Field(..., description="CRITICAL: You MUST provide this field. E.g., 'Two Pointers on [1,3,5,7]'")
+    data: dict = Field(
+        ...,
+        description=(
+            "CRITICAL: The initial data structure state. MUST MATCH the viz_type exactly:\n"
+            "- array: {'array': [1,2,3], 'target': 5}\n"
+            "- linked_list: {'head': [1,2,3,4]}\n"
+            "- binary_tree: {'root': [1,2,3,null,5,null,4]} (LeetCode level-order array format)\n"
+            "- matrix: {'grid': [[1,2],[3,4]]}\n"
+            "- hashmap: {'map': {}}  <-- CRITICAL: MUST be a nested JSON object with key 'map', NEVER a string like '{}' or array."
+        )
+    )
+    steps: list[VisualizationStep]
 
 
 class ApprovePlan(BaseModel):
-    """Call this ONLY when the user has clearly stated:
-    (1) a valid algorithmic approach, AND
-    (2) the correct time and space complexity.
-    Both conditions must be met before calling."""
-
     rationale: str = Field(
         description="One sentence: what the user got right that earns the unlock."
     )
 
 
-def get_llm(model: str, api_base: str, temperature: float = 0.4):
-    return ChatOpenAI(
-        model=model,
+def get_llm(model, temperature: float = 0.4):
+    return ChatGoogleGenerativeAI(
+        model="gemini-3.1-flash-lite", 
         temperature=temperature,
-        openai_api_key=settings.NOVITA_API_KEY,
-        base_url=api_base,
+        google_api_key=settings.GOOGLE_API_KEY,
         max_retries=5,
         timeout=60,
     )
 
 
 def ideation_node(state: MentorState):
-    """Socratic mentor. Asks one question at a time. Gate: ApprovePlan tool."""
-
     llm = get_llm(
-        model="google/gemma-4-31b-it",
-        api_base="https://api.novita.ai/openai",
+        model="gemini-2.5-pro",
         temperature=0.4,
     ).bind_tools([ApprovePlan])
     past_problems = state.get("past_related_problems") or []
     blindspots = state.get("technical_blindspots") or []
     traits = state.get("behavioral_traits") or []
-
-    base_rules = (
-            "RULES — follow them strictly:\n"
-            "1. The code editor is LOCKED. The candidate must earn it by thinking first.\n"
-            "2. NEVER write code. NEVER reveal the algorithm name unprompted.\n"
-            "3. Ask EXACTLY ONE guiding question per turn.\n"
-            "4. ENFORCE THE OPTIMIZATION LADDER. You must guide the user through this exact progression conceptually:\n"
-            "   - Stage 1 (Brute Force): Force them to state the most naive, obvious solution first. Ask for its time/space complexity.\n"
-            "   - Stage 2 (Better): Ask them to identify the bottleneck in their brute force approach.\n"
-            "   - Stage 3 (Optimal): Guide them via hints to the most efficient algorithmic approach.\n"
-            "5. THE GATE: Do NOT call `ApprovePlan` during the Brute Force or Better stages. "
-            "   You may ONLY call `ApprovePlan` when they have clearly stated the OPTIMAL approach AND its correct time/space complexity.\n"
-            "6. If they jump straight to the optimal solution immediately, ask them to briefly explain the brute force approach first just to verify their fundamentals, then proceed."
-    )
 
     behavior_context = ""
     if blindspots or traits:
@@ -124,17 +133,16 @@ def ideation_node(state: MentorState):
             "Focus heavily on Stage 1 (Brute Force). Let them struggle with the naive approach before nudging them toward the bottleneck."
         )
 
-    system = SystemMessage(
-        content=(
-            f"You are an expert DSA interviewer mentoring a candidate on this problem:\n"
-            f"<problem>{state['problem_description']}</problem>\n\n"
-            f"{custom_instructions}\n\n"
-            f"{base_rules}"
-            f"{behavior_context}"
-        )
-    )
+    
+    ideation_prompt = client.pull_prompt("basecase-mentor-ideation")
+    formatted_prompt = ideation_prompt.invoke({
+        "problem_description": state['problem_description'],
+        "custom_instructions": custom_instructions,
+        "behavior_context": behavior_context,
+        "messages": state["messages"]
+    })
 
-    response = llm.invoke([system] + state["messages"])
+    response = llm.invoke(formatted_prompt)
     return {"messages": [response]}
 
 
@@ -148,126 +156,52 @@ def route_after_ideation(state: MentorState) -> Literal["transition_node", "__en
 
 
 def transition_node(state: MentorState):
-    """Unlock coding phase after ApprovePlan is called."""
     last_msg = state["messages"][-1]
     tool_call = last_msg.tool_calls[0]
+    
+    rationale = tool_call["args"].get("rationale", "User successfully planned the optimal approach.")
 
     tool_msg = ToolMessage(
         content="Plan approved. Transitioning to coding phase.",
         tool_call_id=tool_call["id"],
     )
-
-    ai_msg = AIMessage(
-        content=(
-            "Perfect. Your approach is solid and your complexity analysis is correct. "
-            "I've unlocked the code editor — let's see your implementation. "
-            "I'm here if you get stuck."
-        )
+    
+    congratulatory_msg = AIMessage(
+        content="Perfect! Your approach is solid and your complexity analysis is correct. I have unlocked the code editor for you—let's see your implementation. I'm here if you get stuck!"
     )
 
     return {
         "current_phase": "CODING",
-        "messages": [tool_msg, ai_msg],
+        "agreed_plan": rationale,
+        "messages": [tool_msg, congratulatory_msg],
     }
 
 
-def intent_router(state: MentorState) -> Literal["chat_node", "hint_node", "review_node"]:
-    """Route coding-phase turns. Short-circuit submit when code is already in state."""
-    if state.get("code_submission"):
-        return "review_node"
-
+def coding_node(state: MentorState):
     llm = get_llm(
-        model="google/gemma-4-31b-it",
-        api_base="https://api.novita.ai/openai",
-        temperature=0.0,
-    ).with_structured_output(IntentClassification)
+        model="gemini-2.5-pro",
+        temperature=0.3,
+    ).bind_tools([GenerateVisualization])
 
-    system = SystemMessage(
-        content=(
-            "Classify the intent of the user's last message in a DSA coding session.\n\n"
-            "Intents:\n"
-            "- chat: thinking out loud, asking clarifying questions, general conversation\n"
-            "- stuck: explicitly asking for help, saying they don't know, requesting a hint\n"
-            "- submit: saying their code is done / ready for review\n\n"
-            f"Problem context: {state['problem_description']}"
-        )
-    )
+    agreed_plan = state.get("agreed_plan", "No plan recorded.")
 
-    last_message = state["messages"][-1]
-    result = llm.invoke([system, last_message], config={"callbacks": []})
+    coding_prompt = client.pull_prompt("basecase-mentor-coding")
+    formatted_prompt = coding_prompt.invoke({
+        "problem_description": state['problem_description'],
+        "agreed_plan": agreed_plan,
+        "messages": state["messages"]
+    })
 
-    intent_to_node = {
-        "chat": "chat_node",
-        "stuck": "hint_node",
-        "submit": "review_node",
-    }
-    return intent_to_node[result.intent]
-
-
-def coding_entry(state: MentorState):
-    """Anchor node for the coding phase routing edge."""
-    return {}
-
-
-def chat_node(state: MentorState):
-    """Normal coding conversation."""
-    llm = get_llm(
-        model="google/gemma-4-31b-it",
-        api_base="https://api.novita.ai/openai",
-        temperature=0.4,
-    )
-
-    system = SystemMessage(
-        content=(
-            f"You are an expert DSA mentor. The candidate is coding this problem:\n"
-            f"<problem>{state['problem_description']}</problem>\n\n"
-            "RULES:\n"
-            "1. Do NOT write code for them. Do NOT give away the solution.\n"
-            "2. Encourage their thinking. Ask ONE clarifying question if needed.\n"
-            "3. If you spot a bug, point to the area — don't fix it.\n"
-            "4. Keep responses short. One thought per turn."
-        )
-    )
-
-    response = llm.invoke([system] + state["messages"])
+    response = llm.invoke(formatted_prompt)
     return {"messages": [response]}
 
-
-def hint_node(state: MentorState):
-    """Give one hint when the user is stuck."""
-    llm = get_llm(
-        model="google/gemma-4-31b-it",
-        api_base="https://api.novita.ai/openai",
-        temperature=0.5,
-    )
-
-    last_message_content = state["messages"][-1].content
-
-    system = SystemMessage(
-        content=(
-            f"You are a DSA mentor. The candidate is solving:\n"
-            f"<problem>{state['problem_description']}</problem>\n\n"
-            f"The candidate appears stuck. Their last message: \"{last_message_content}\"\n\n"
-            "Give ONE hint. Rules:\n"
-            "- Do NOT write code.\n"
-            "- Do NOT give the full answer.\n"
-            "- Give the next smallest concrete thing to think about.\n"
-            "- Be warm and encouraging.\n"
-            "- Maximum 2-3 sentences."
-        )
-    )
-
-    response = llm.invoke([system] + state["messages"])
-    return {"messages": [response]}
 
 
 def review_node(state: MentorState):
-    """Review submitted code and clear code_submission after feedback."""
     llm = get_llm(
-        model="google/gemma-4-31b-it",
-        api_base="https://api.novita.ai/openai",
+        model="gemini-3.1-flash-lite",
         temperature=0.2,
-    )
+    ).with_structured_output(CodeReview)
 
     code = state.get("code_submission")
 
@@ -280,26 +214,20 @@ def review_node(state: MentorState):
         )
         return {"messages": [response]}
 
-    system = SystemMessage(
-        content=(
-            f"You are a senior engineer reviewing a DSA solution.\n"
-            f"Problem: {state['problem_description']}\n\n"
-            f"Code submitted:\n```\n{code}\n```\n\n"
-            "Provide feedback in this exact structure:\n\n"
-            "**Correctness** — does it solve the problem? Any bugs or missed edge cases?\n"
-            "**Complexity** — actual time and space complexity with reasoning.\n"
-            "**Style** — readability, naming, structure.\n"
-            "**One thing to improve** — the single highest-priority change.\n\n"
-            "Be direct and specific. No filler. No praise for the sake of praise."
-        )
-    )
+    prompt_template = client.pull_prompt("basecase-mentor-review")
+    formatted_prompt = prompt_template.invoke({
+        "problem_description": state['problem_description'],
+        "code": code,
+        "messages": state["messages"]
+    })
 
-    response = llm.invoke([system] + state["messages"])
+    summary = llm.invoke(formatted_prompt)
 
     return {
-        "review": response,
+        "review": summary.dict(),
         "code_submission": None,
     }
+
 
 
 def route_after_review(state: MentorState) -> Literal["extractor_node", "__end__"]:
@@ -311,42 +239,40 @@ def route_after_review(state: MentorState) -> Literal["extractor_node", "__end__
 
 
 def extractor_node(state: MentorState):
-    """Extract session summary for the gateway to forward to the product backend."""
     llm = get_llm(
-        model="google/gemma-4-31b-it",
-        api_base="https://api.novita.ai/openai",
+        model="gemini-3.1-flash-lite",
         temperature=0.1,
     ).with_structured_output(SessionSummary)
 
-    system = SystemMessage(
-        content=(
-            "You are an analytical engine. Review the following Socratic coding session "
-            "and extract the student's technical blindspots, behavioral traits, and concept mastery. "
-            "Also, identify the formal problem name and the core algorithmic pattern used. "
-            "Do not output markdown, only the requested JSON schema."
-        )
-    )
+    prompt_template = client.pull_prompt("basecase-mentor-extractor")
+    transcript = "\\n".join([f"{msg.type}: {msg.content}" for msg in state["messages"]])
+    
+    formatted_prompt = prompt_template.invoke({
+        "transcript": transcript
+    })
 
-    summary = llm.invoke([system] + state["messages"])
+    summary = llm.invoke(formatted_prompt)
     return {}
 
 
-def route_on_phase(state: MentorState) -> Literal["ideation_node", "coding_entry"]:
-    return "coding_entry" if state["current_phase"] == "CODING" else "ideation_node"
+def route_on_phase(state: MentorState) -> Literal["ideation_node", "coding_node", "review_node"]:
+    if state["current_phase"] == "CODING":
+        if state.get("code_submission"):
+            return "review_node"
+        return "coding_node"
+    return "ideation_node"
+
 
 
 workflow = StateGraph(MentorState)
 
 workflow.add_node("ideation_node", ideation_node)
 workflow.add_node("transition_node", transition_node)
-workflow.add_node("coding_entry", coding_entry)
-workflow.add_node("chat_node", chat_node)
-workflow.add_node("hint_node", hint_node)
+workflow.add_node("coding_node", coding_node)
 workflow.add_node("review_node", review_node)
 workflow.add_node("extractor_node", extractor_node)
 
-workflow.add_conditional_edges(START, route_on_phase, ["ideation_node", "coding_entry"])
-
+workflow.add_conditional_edges(START, route_on_phase, ["ideation_node", "coding_node", "review_node"])
 workflow.add_conditional_edges(
     "ideation_node",
     route_after_ideation,
@@ -354,18 +280,7 @@ workflow.add_conditional_edges(
 )
 workflow.add_edge("transition_node", END)
 
-workflow.add_conditional_edges(
-    "coding_entry",
-    intent_router,
-    {
-        "chat_node": "chat_node",
-        "hint_node": "hint_node",
-        "review_node": "review_node",
-    },
-)
-
-workflow.add_edge("chat_node", END)
-workflow.add_edge("hint_node", END)
+workflow.add_edge("coding_node", END)
 workflow.add_conditional_edges(
     "review_node",
     route_after_review,
