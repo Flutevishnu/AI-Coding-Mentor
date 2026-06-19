@@ -1,16 +1,27 @@
-from typing import Annotated, Literal, Optional, TypedDict
+from typing import Annotated, Any, Literal, Optional, TypedDict
 
 from langchain_core.messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from pydantic import BaseModel, Field
+from langsmith import Client
+from pydantic import BaseModel, Field, ValidationError
 
 from core.config import settings
-from typing import Annotated, Literal, Optional, TypedDict, Any
-from langsmith import Client
+from core.logging_config import logger
 
 client = Client()
+
+PROMPTS = {
+    "ideation": client.pull_prompt("basecase-mentor-ideation"),
+    "coding": client.pull_prompt("basecase-mentor-coding"),
+    "review": client.pull_prompt("basecase-mentor-review"),
+    "extractor": client.pull_prompt("basecase-mentor-extractor"),
+}
+
+FALLBACK_MESSAGE = (
+    "I'm having trouble responding right now. Please try again in a moment."
+)
 
 class MentorState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
@@ -89,7 +100,7 @@ class ApprovePlan(BaseModel):
 
 def get_llm(model, temperature: float = 0.4):
     return ChatGoogleGenerativeAI(
-        model="gemini-3.1-flash-lite", 
+        model=model, 
         temperature=temperature,
         google_api_key=settings.GOOGLE_API_KEY,
         max_retries=5,
@@ -99,7 +110,7 @@ def get_llm(model, temperature: float = 0.4):
 
 def ideation_node(state: MentorState):
     llm = get_llm(
-        model="gemini-2.5-pro",
+        model=settings.BIG_MODEL,
         temperature=0.4,
     ).bind_tools([ApprovePlan])
     past_problems = state.get("past_related_problems") or []
@@ -134,15 +145,21 @@ def ideation_node(state: MentorState):
         )
 
     
-    ideation_prompt = client.pull_prompt("basecase-mentor-ideation")
-    formatted_prompt = ideation_prompt.invoke({
-        "problem_description": state['problem_description'],
-        "custom_instructions": custom_instructions,
-        "behavior_context": behavior_context,
-        "messages": state["messages"]
-    })
+    formatted_prompt = format_prompt(
+        "ideation",
+        node="ideation_node",
+        problem_description=state['problem_description'],
+        custom_instructions=custom_instructions,
+        behavior_context=behavior_context,
+        messages=list(state["messages"]),
+    )
+    if formatted_prompt is None:
+        return {"messages": [AIMessage(content=FALLBACK_MESSAGE)]}
 
-    response = llm.invoke(formatted_prompt)
+    response = safe_invoke(llm, formatted_prompt, node="ideation_node")
+    if response is None:
+        return {"messages": [AIMessage(content=FALLBACK_MESSAGE)]}
+
     return {"messages": [response]}
 
 
@@ -157,8 +174,15 @@ def route_after_ideation(state: MentorState) -> Literal["transition_node", "__en
 
 def transition_node(state: MentorState):
     last_msg = state["messages"][-1]
-    tool_call = last_msg.tool_calls[0]
-    
+    tool_calls = getattr(last_msg, "tool_calls", None) or []
+
+    tool_call = next(
+        (tc for tc in tool_calls if tc["name"] == "ApprovePlan"),
+        None,
+    )
+    if not tool_call:
+        return {}
+
     rationale = tool_call["args"].get("rationale", "User successfully planned the optimal approach.")
 
     tool_msg = ToolMessage(
@@ -177,32 +201,155 @@ def transition_node(state: MentorState):
     }
 
 
+def _to_messages(prompt) -> list:
+    if hasattr(prompt, "to_messages"):
+        return list(prompt.to_messages())
+    if isinstance(prompt, list):
+        return list(prompt)
+    return [prompt]
+
+
+def safe_invoke(llm, messages, *, node: str):
+    """Invoke an LLM, logging and swallowing any exception.
+
+    Returns the raw model output on success, or ``None`` if the call failed so
+    callers can degrade gracefully instead of crashing the graph run.
+    """
+    try:
+        return llm.invoke(messages)
+    except Exception:
+        logger.exception("LLM invoke failed | node=%s", node)
+        return None
+
+
+def format_prompt(name: str, *, node: str, **values):
+    """Format a cached prompt, logging and swallowing any exception."""
+    try:
+        return PROMPTS[name].invoke(values)
+    except Exception:
+        logger.exception("Prompt formatting failed | node=%s | prompt=%s", node, name)
+        return None
+
+
+def _tool_validation_errors(
+    message: AIMessage,
+    tool_name: str,
+    schema: type[BaseModel],
+) -> list[str]:
+    errors = []
+    for tool_call in getattr(message, "tool_calls", None) or []:
+        if tool_call["name"] != tool_name:
+            continue
+        try:
+            schema.model_validate(tool_call["args"])
+        except ValidationError as exc:
+            errors.append(str(exc))
+    return errors
+
+
+def retry_validated_tool_call(
+    llm,
+    prompt,
+    *,
+    tool_name: str,
+    schema: type[BaseModel],
+    max_attempts: int = 3,
+) -> AIMessage:
+    base_messages = _to_messages(prompt)
+    correction = None
+    last_response = None
+
+    for attempt in range(max_attempts):
+        invoke_messages = base_messages if correction is None else base_messages + [correction]
+        response = safe_invoke(llm, invoke_messages, node="coding_node")
+        if response is None:
+            return AIMessage(content=FALLBACK_MESSAGE)
+        last_response = response
+
+        has_target_tool = any(
+            tc["name"] == tool_name
+            for tc in (getattr(response, "tool_calls", None) or [])
+        )
+        if not has_target_tool:
+            return response
+
+        errors = _tool_validation_errors(response, tool_name, schema)
+        if not errors:
+            return response
+
+        logger.warning(
+            "%s validation failed | attempt=%s/%s | errors=%s",
+            tool_name, attempt + 1, max_attempts, " | ".join(errors),
+        )
+
+        if attempt < max_attempts - 1:
+            correction = SystemMessage(
+                content=(
+                    f"{tool_name} failed validation: {' | '.join(errors)}. "
+                    "Return a corrected tool call that matches the schema exactly."
+                )
+            )
+
+    logger.error("%s still invalid after %s attempts; returning text only", tool_name, max_attempts)
+    return AIMessage(content=last_response.content if last_response else FALLBACK_MESSAGE)
+
+
 def coding_node(state: MentorState):
     llm = get_llm(
-        model="gemini-2.5-pro",
+        model=settings.BIG_MODEL,
         temperature=0.3,
     ).bind_tools([GenerateVisualization])
 
     agreed_plan = state.get("agreed_plan", "No plan recorded.")
 
-    coding_prompt = client.pull_prompt("basecase-mentor-coding")
-    formatted_prompt = coding_prompt.invoke({
-        "problem_description": state['problem_description'],
-        "agreed_plan": agreed_plan,
-        "messages": state["messages"]
-    })
+    formatted_prompt = format_prompt(
+        "coding",
+        node="coding_node",
+        problem_description=state['problem_description'],
+        agreed_plan=agreed_plan,
+        messages=list(state["messages"]),
+    )
+    if formatted_prompt is None:
+        return {"messages": [AIMessage(content=FALLBACK_MESSAGE)]}
 
-    response = llm.invoke(formatted_prompt)
+    response = retry_validated_tool_call(
+        llm,
+        formatted_prompt,
+        tool_name="GenerateVisualization",
+        schema=GenerateVisualization,
+    )
     return {"messages": [response]}
 
 
+def retry_structured_output(llm, prompt, max_attempts=3, *, node: str):
+    base_messages = _to_messages(prompt)
+    correction = None
+
+    for attempt in range(max_attempts):
+        invoke_messages = base_messages if correction is None else base_messages + [correction]
+        response = safe_invoke(llm, invoke_messages, node=node)
+        if response is None:
+            return None
+
+        if response["parsing_error"] is None and response["parsed"] is not None:
+            return response["parsed"]
+
+        logger.warning(
+            "Structured output validation failed | node=%s | attempt=%s/%s | error=%s",
+            node, attempt + 1, max_attempts, response["parsing_error"],
+        )
+
+        correction = SystemMessage(
+            content=(
+                f"Validation failed: {response['parsing_error']}. "
+                "Return output matching the schema exactly."
+            )
+        )
+
+    logger.error("Structured output failed after %s attempts | node=%s", max_attempts, node)
+    return None
 
 def review_node(state: MentorState):
-    llm = get_llm(
-        model="gemini-3.1-flash-lite",
-        temperature=0.2,
-    ).with_structured_output(CodeReview)
-
     code = state.get("code_submission")
 
     if not code:
@@ -214,45 +361,61 @@ def review_node(state: MentorState):
         )
         return {"messages": [response]}
 
-    prompt_template = client.pull_prompt("basecase-mentor-review")
-    formatted_prompt = prompt_template.invoke({
-        "problem_description": state['problem_description'],
-        "code": code,
-        "messages": state["messages"]
-    })
+    llm = get_llm(
+        model=settings.SMALL_MODEL,
+        temperature=0.2,
+    ).with_structured_output(CodeReview, include_raw=True)
 
-    summary = llm.invoke(formatted_prompt)
+    
+    formatted_prompt = format_prompt(
+        "review",
+        node="review_node",
+        problem_description=state['problem_description'],
+        code=code,
+        messages=list(state["messages"]),
+    )
+    if formatted_prompt is None:
+        return {"messages": [AIMessage(content="Please try submitting the code again.")]}
 
-    return {
-        "review": summary.dict(),
-        "code_submission": None,
-    }
+    summary = retry_structured_output(llm, formatted_prompt, node="review_node")
+    if not summary:
+        response = AIMessage(
+            content="Please try submitting the code again."
+        )
+        return {"messages": [response]}
 
+    return {"review": summary.model_dump(), "code_submission": None}
 
 
 def route_after_review(state: MentorState) -> Literal["extractor_node", "__end__"]:
-    last = state["messages"][-1]
-    content = last.content if isinstance(last.content, str) else ""
-    if "Submit button" in content:
-        return END
-    return "extractor_node"
+    if state.get("review"):
+        return "extractor_node"
+    return END
 
 
 def extractor_node(state: MentorState):
     llm = get_llm(
-        model="gemini-3.1-flash-lite",
+        model=settings.SMALL_MODEL,
         temperature=0.1,
-    ).with_structured_output(SessionSummary)
+    ).with_structured_output(SessionSummary, include_raw=True)
 
-    prompt_template = client.pull_prompt("basecase-mentor-extractor")
-    transcript = "\\n".join([f"{msg.type}: {msg.content}" for msg in state["messages"]])
-    
-    formatted_prompt = prompt_template.invoke({
-        "transcript": transcript
-    })
+    transcript = "\n".join([f"{msg.type}: {msg.content}" for msg in state["messages"]])
 
-    summary = llm.invoke(formatted_prompt)
-    return {}
+    formatted_prompt = format_prompt(
+        "extractor",
+        node="extractor_node",
+        transcript=transcript,
+    )
+    if formatted_prompt is None:
+        return {}
+
+    summary = retry_structured_output(llm, formatted_prompt, node="extractor_node")
+    if summary is None:
+        logger.error("Session extraction failed; skipping summary persistence")
+        return {}
+
+    logger.info("Session summary extracted | problem=%s", summary.problem_name)
+    return {"session_summary": summary.model_dump()}
 
 
 def route_on_phase(state: MentorState) -> Literal["ideation_node", "coding_node", "review_node"]:

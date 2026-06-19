@@ -5,6 +5,7 @@ description = "LangGraph agent service for the AI Coding Mentor"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "langchain-google-genai>=4.2.5",
     "langchain-openai>=1.2.1",
     "langgraph>=1.2.0",
     "langgraph-checkpoint-postgres>=3.1.0",

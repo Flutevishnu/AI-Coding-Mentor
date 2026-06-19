@@ -44,3 +44,7 @@ Thumbs.db
 # langgrapg files
 *.langgraph
 .langgraph_api/
+
+# logs
+logs/
+*.log
