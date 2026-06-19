@@ -12,14 +12,38 @@ The backend acts as a stateful graph (Finite State Machine) that manages the lif
 - **`review_node`**: Uses native JSON Structured Output to provide a strict, predictable payload containing correctness, complexity, style, and improvement feedback.
 - **`extractor_node`**: A background process that parses the entire chat transcript upon submission and extracts a JSON schema of the student's technical blindspots and behavioral traits.
 
-## Observability & Prompt Engineering
+## Prompt Engineering
 
-We decouple all logic from our prompts to ensure rapid iteration and zero-downtime updates.
-All major system instructions are hosted on the **LangChain Prompt Hub**. The python code dynamically pulls:
+Logic is decoupled from prompts to allow rapid iteration. All system instructions are hosted on the **LangChain Prompt Hub**:
 - `basecase-mentor-ideation`
 - `basecase-mentor-coding`
 - `basecase-mentor-review`
 - `basecase-mentor-extractor`
+
+## Configuration
+
+Configuration is loaded from a `.env` file in the project root:
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `GOOGLE_API_KEY` | Yes | — | Google Gemini API key |
+| `LANGSMITH_API_KEY` | Yes | — | Pulls prompts from the LangChain Prompt Hub |
+| `BIG_MODEL` | Yes | — | Model for ideation and coding nodes |
+| `SMALL_MODEL` | Yes | — | Model for review and extractor nodes |
+| `ENV` | No | `dev` | `dev` or `prod` |
+| `LOG_DIR` | No | `logs` | Directory for log files |
+| `LOG_LEVEL` | No | `INFO` | Standard Python log level |
+| `POSTGRES_URI_CUSTOM` | No | — | Custom Postgres for LangGraph checkpointing |
+
+Example `.env`:
+
+```env
+GOOGLE_API_KEY=your-google-api-key
+LANGSMITH_API_KEY=your-langsmith-api-key
+BIG_MODEL=gemini-3.5-flash
+SMALL_MODEL=gemini-3.1-flash-lite
+ENV=dev
+```
 
 ## Quick Start
 
