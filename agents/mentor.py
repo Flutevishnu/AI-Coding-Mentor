@@ -26,7 +26,7 @@ FALLBACK_MESSAGE = (
 class MentorState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     problem_description: str
-    current_phase: Literal["IDEATION", "CODING"]
+    current_phase: Literal["IDEATION", "CODING", "REVIEW"]
     agreed_plan: Optional[str]
     code_submission: Optional[str]
     past_related_problems: Optional[list[str]]
@@ -384,7 +384,7 @@ def review_node(state: MentorState):
         )
         return {"messages": [response]}
 
-    return {"review": summary.model_dump(), "code_submission": None}
+    return {"review": summary.model_dump(), "code_submission": None, "current_phase": "REVIEW"}
 
 
 def route_after_review(state: MentorState) -> Literal["extractor_node", "__end__"]:
