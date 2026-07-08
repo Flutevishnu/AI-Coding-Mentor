@@ -1,6 +1,6 @@
 from typing import Annotated, Any, Literal, Optional, TypedDict
 
-from langchain_core.messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, SystemMessage, ToolMessage, HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -33,6 +33,7 @@ class MentorState(TypedDict):
     technical_blindspots: Optional[list[str]]
     behavioral_traits: Optional[list[str]]
     review: Optional[dict]
+    problem_tags: Optional[list[str]]
     session_summary: Optional[dict]
 
 
@@ -43,16 +44,14 @@ class CodeReview(BaseModel):
     improvement: str = Field(description="The single highest-priority change.")
 
 class ConceptMastery(BaseModel):
-    concept: str = Field(description="E.g., 'Two-pointer technique', 'Space complexity analysis'")
+    tag: str = Field(description="CRITICAL: MUST be chosen exactly from the provided problem_tags list. Do NOT invent new tags (e.g. use 'Two Pointers', not specific algorithm names).")
     status: Literal["mastered", "struggling", "needs_review"]
-    context: str = Field(description="One sentence explaining WHY they are struggling or mastered it.")
+    general_context: str = Field(description="One sentence summarizing their overall understanding of this tag.")
+    approach_used: str = Field(description="How they solved THIS specific problem.")
 
 
 class SessionSummary(BaseModel):
     problem_name: str = Field(description="The formal name of the problem solved in this session.")
-    core_pattern_used: str = Field(
-        description="The primary algorithmic pattern (e.g., 'Two Pointers', 'Sliding Window', 'DFS')."
-    )
     technical_blindspots: list[str] = Field(
         description="Specific coding habits to watch out for. E.g., 'Frequently writes out-of-bounds array loops'."
     )
@@ -60,7 +59,7 @@ class SessionSummary(BaseModel):
         description="How the user interacts. E.g., 'Jumps straight to coding without planning', 'Gets frustrated easily'."
     )
     concept_updates: list[ConceptMastery] = Field(
-        description="Updates on specific DSA concepts encountered in this session."
+        description="Updates on specific concepts encountered in this session."
     )
 
 
@@ -210,11 +209,6 @@ def _to_messages(prompt) -> list:
 
 
 def safe_invoke(llm, messages, *, node: str):
-    """Invoke an LLM, logging and swallowing any exception.
-
-    Returns the raw model output on success, or ``None`` if the call failed so
-    callers can degrade gracefully instead of crashing the graph run.
-    """
     try:
         return llm.invoke(messages)
     except Exception:
@@ -223,7 +217,6 @@ def safe_invoke(llm, messages, *, node: str):
 
 
 def format_prompt(name: str, *, node: str, **values):
-    """Format a cached prompt, logging and swallowing any exception."""
     try:
         return PROMPTS[name].invoke(values)
     except Exception:
@@ -322,7 +315,12 @@ def coding_node(state: MentorState):
 
 
 def retry_structured_output(llm, prompt, max_attempts=3, *, node: str):
+
     base_messages = _to_messages(prompt)
+    
+    if not any(isinstance(m, (HumanMessage, AIMessage)) for m in base_messages):
+        base_messages.append(HumanMessage(content="Please process the above instructions."))
+        
     correction = None
 
     for attempt in range(max_attempts):
@@ -405,6 +403,7 @@ def extractor_node(state: MentorState):
         "extractor",
         node="extractor_node",
         transcript=transcript,
+        problem_tags=state.get("problem_tags", []),
     )
     if formatted_prompt is None:
         return {}
@@ -419,7 +418,8 @@ def extractor_node(state: MentorState):
 
 
 def route_on_phase(state: MentorState) -> Literal["ideation_node", "coding_node", "review_node"]:
-    if state["current_phase"] == "CODING":
+    phase = state.get("current_phase", "IDEATION")
+    if phase == "CODING":
         if state.get("code_submission"):
             return "review_node"
         return "coding_node"
