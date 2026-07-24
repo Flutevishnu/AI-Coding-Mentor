@@ -12,7 +12,6 @@ RUN for dep in /deps/*; do             echo "Installing $dep";             if [ 
 
 # -- End of local dependencies install --
 
-ENV LANGGRAPH_AUTH='{"path": "/deps/AI-Coding-Mentor/auth.py:auth"}'
 
 ENV LANGGRAPH_CHECKPOINTER='{"ttl": {"strategy": "delete", "sweep_interval_minutes": 180, "default_ttl": 1440}}'
 
