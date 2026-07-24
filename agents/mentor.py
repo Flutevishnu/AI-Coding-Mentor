@@ -38,10 +38,12 @@ class MentorState(TypedDict):
 
 
 class CodeReview(BaseModel):
-    correctness: str = Field(description="Does it solve the problem? Any bugs or missed edge cases?")
-    complexity: str = Field(description="Actual time and space complexity with reasoning.")
-    style: str = Field(description="Readability, naming, structure.")
-    improvement: str = Field(description="The single highest-priority change.")
+    is_correct: bool = Field(description="True if the code correctly solves the problem, False otherwise.")
+    feedback: str = Field(description="If is_correct is False, explain the bug and give a hint. If True, provide a short congratulatory message.")
+    correctness: Optional[str] = Field(default=None, description="Only provide if is_correct is True. Does it solve the problem? Any bugs or missed edge cases?")
+    complexity: Optional[str] = Field(default=None, description="Only provide if is_correct is True. Actual time and space complexity with reasoning.")
+    style: Optional[str] = Field(default=None, description="Only provide if is_correct is True. Readability, naming, structure.")
+    improvement: Optional[str] = Field(default=None, description="Only provide if is_correct is True. The single highest-priority change.")
 
 class ConceptMastery(BaseModel):
     tag: str = Field(description="CRITICAL: MUST be chosen exactly from the provided problem_tags list. Do NOT invent new tags (e.g. use 'Two Pointers', not specific algorithm names).")
@@ -382,11 +384,24 @@ def review_node(state: MentorState):
         )
         return {"messages": [response]}
 
-    return {"review": summary.model_dump(), "code_submission": None, "current_phase": "REVIEW"}
+    if not summary.is_correct:
+        response = AIMessage(content=summary.feedback)
+        return {
+            "messages": [response],
+            "current_phase": "CODING",
+            "review": None
+        }
+
+    return {
+        "messages": [AIMessage(content=summary.feedback)],
+        "review": summary.model_dump(), 
+        "code_submission": None, 
+        "current_phase": "REVIEW"
+    }
 
 
 def route_after_review(state: MentorState) -> Literal["extractor_node", "__end__"]:
-    if state.get("review"):
+    if state.get("current_phase") == "REVIEW" and state.get("review"):
         return "extractor_node"
     return END
 

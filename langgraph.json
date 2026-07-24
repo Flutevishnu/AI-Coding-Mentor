@@ -5,9 +5,6 @@
   "graphs": {
     "agent": "agents.mentor:mentor_graph"
   },
-  "auth": {
-    "path": "./auth.py:auth"
-  },
   "checkpointer": {
     "ttl": {
       "strategy": "delete",
