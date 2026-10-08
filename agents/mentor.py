@@ -374,22 +374,28 @@ def review_node(state: MentorState):
         code=code,
         messages=list(state["messages"]),
     )
+    # Every path that doesn't accept the code clears code_submission; otherwise
+    # route_on_phase sends the next chat turn back into review_node.
     if formatted_prompt is None:
-        return {"messages": [AIMessage(content="Please try submitting the code again.")]}
+        return {
+            "messages": [AIMessage(content="Please try submitting the code again.")],
+            "code_submission": None,
+        }
 
     summary = retry_structured_output(llm, formatted_prompt, node="review_node")
     if not summary:
         response = AIMessage(
             content="Please try submitting the code again."
         )
-        return {"messages": [response]}
+        return {"messages": [response], "code_submission": None}
 
     if not summary.is_correct:
         response = AIMessage(content=summary.feedback)
         return {
             "messages": [response],
             "current_phase": "CODING",
-            "review": None
+            "review": None,
+            "code_submission": None,
         }
 
     return {
