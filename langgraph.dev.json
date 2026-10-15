@@ -1,0 +1,10 @@
+{
+  "dependencies": [
+    "."
+  ],
+  "graphs": {
+    "agent": "agents.mentor:mentor_graph"
+  },
+  "python_version": "3.12",
+  "env": ".env"
+}
